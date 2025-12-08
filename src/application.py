@@ -100,6 +100,9 @@ class Application:
             from src.plugins.audio import AudioPlugin
 
             # 注册音频、UI、MCP、IoT、唤醒词、快捷键与日程插件（UI模式从run参数传入）
+            # 插件会自动按 priority 排序：
+            # AudioPlugin(10) -> McpPlugin(20) -> WakeWordPlugin(30) -> CalendarPlugin(40)
+            # -> IoTPlugin(50) -> UIPlugin(60) -> ShortcutsPlugin(70)
             self.plugins.register(
                 McpPlugin(),
                 IoTPlugin(),
@@ -258,11 +261,6 @@ class Application:
         return task
 
     def schedule_command_nowait(self, fn, *args, **kwargs) -> None:
-        """简化的“立即调度”：把任意可调用丢回主loop执行。
-
-        - 若返回协程，会被自动创建子任务执行（fire-and-forget）。
-        - 若是同步函数，直接在事件循环线程里运行（尽量保持轻量）。
-        """
         if not self._main_loop or self._main_loop.is_closed():
             logger.warning("主事件循环未就绪，拒绝调度")
             return
@@ -322,6 +320,10 @@ class Application:
                         # 继续对话：根据当前模式重启监听
                         async def _restart_listening():
                             try:
+                                # 先设置状态为 LISTENING，触发音频队列清空和硬件停止等待
+                                await self.set_device_state(DeviceState.LISTENING)
+
+                                # 等待音频硬件完全停止后，再发送监听指令
                                 # REALTIME 且已在 LISTENING 时无需重复发送
                                 if not (
                                     self.listening_mode == ListeningMode.REALTIME
@@ -332,9 +334,6 @@ class Application:
                                     )
                             except Exception:
                                 pass
-                            self.keep_listening and await self.set_device_state(
-                                DeviceState.LISTENING
-                            )
 
                         self.spawn(_restart_listening(), "state:tts_stop_restart")
                     else:
@@ -407,6 +406,20 @@ class Application:
     def is_audio_channel_opened(self) -> bool:
         try:
             return bool(self.protocol and self.protocol.is_audio_channel_opened())
+        except Exception:
+            return False
+
+    def should_capture_audio(self) -> bool:
+        try:
+            if self.device_state == DeviceState.LISTENING and not self.aborted:
+                return True
+
+            return (
+                self.device_state == DeviceState.SPEAKING
+                and self.aec_enabled
+                and self.keep_listening
+                and self.listening_mode == ListeningMode.REALTIME
+            )
         except Exception:
             return False
 

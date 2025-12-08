@@ -10,7 +10,7 @@ from src.utils.logging_config import get_logger
 from .app_management.killer import kill_application, list_running_applications
 from .app_management.launcher import launch_application
 from .app_management.scanner import scan_installed_applications
-from .tools import get_system_status, set_volume
+from .tools import get_volume, set_volume
 
 logger = get_logger(__name__)
 
@@ -34,11 +34,13 @@ class SystemToolsManager:
         try:
             logger.info("[SystemManager] 开始注册系统工具")
 
-            # 注册获取设备状态工具
-            self._register_device_status_tool(add_tool, PropertyList)
-
             # 注册音量控制工具
             self._register_volume_control_tool(
+                add_tool, PropertyList, Property, PropertyType
+            )
+
+            # 注册音量获取工具
+            self._register_volume_get_tool(
                 add_tool, PropertyList, Property, PropertyType
             )
 
@@ -64,27 +66,6 @@ class SystemToolsManager:
             logger.error(f"[SystemManager] 系统工具注册失败: {e}", exc_info=True)
             raise
 
-    def _register_device_status_tool(self, add_tool, PropertyList):
-        """
-        注册设备状态查询工具.
-        """
-        add_tool(
-            (
-                "self.get_device_status",
-                "Provides comprehensive real-time system information including "
-                "OS details, CPU usage, memory status, disk usage, battery info, "
-                "audio speaker volume and settings, and application state.\n"
-                "Use this tool for: \n"
-                "1. Answering questions about current system condition\n"
-                "2. Getting detailed hardware and software status\n"
-                "3. Checking current audio volume level and mute status\n"
-                "4. As the first step before controlling device settings",
-                PropertyList(),
-                get_system_status,
-            )
-        )
-        logger.debug("[SystemManager] 注册设备状态工具成功")
-
     def _register_volume_control_tool(
         self, add_tool, PropertyList, Property, PropertyType
     ):
@@ -97,23 +78,39 @@ class SystemToolsManager:
         add_tool(
             (
                 "self.audio_speaker.set_volume",
-                "Set system speaker volume to an absolute value (0–100). Always "
-                "provide integer 'volume'.\n"
-                "Use this tool when:\n"
-                "1. User asks to set volume to a specific percent/number (e.g., '音量设为50%')\n"
-                "2. User asks to increase/decrease volume relatively ('调大/调小一点'): first call "
-                "`self.get_device_status` to read current audio_speaker.volume, compute a target within 0–100, "
-                "then call this tool\n"
-                "3. Ensuring volume stays within 0–100 (do not guess current value)\n\n"
-                "Parameters:\n"
-                "- volume: INTEGER in [0, 100] (absolute target)\n\n"
-                "Notes: If the current volume is unknown, do NOT assume it — call `self.get_device_status` first. "
-                "To mute, set volume=0. This tool does not toggle mute state.",
+                "Set the system speaker volume to an absolute value (0-100).\n"
+                "Use when user mentions: volume, sound, louder, quieter, mute, unmute, adjust volume.\n"
+                "Examples: 'set volume to 50', 'turn volume up', 'make it louder', 'mute', "
+                "'音量设为50', '调大声音', '声音小一点', '静音'.\n"
+                "Parameter:\n"
+                "- volume: Integer (0-100) representing the target volume level. Set to 0 for mute.",
                 volume_props,
                 set_volume,
             )
         )
         logger.debug("[SystemManager] 注册音量控制工具成功")
+
+    def _register_volume_get_tool(
+        self, add_tool, PropertyList, Property, PropertyType
+    ):
+        """
+        注册音量获取工具.
+        """
+        get_volume_props = PropertyList([])
+        add_tool(
+            (
+                "self.audio_speaker.get_volume",
+                "Get the current system speaker volume level.\n"
+                "Use when user asks about: current volume, volume level, how loud, what's the volume.\n"
+                "Examples: 'what is the current volume?', 'how loud is it?', 'check volume level', "
+                "'现在音量多少?', '查看音量', '音量是多少'.\n"
+                "Returns:\n"
+                "- Integer (0-100) representing the current volume level.",
+                get_volume_props,
+                get_volume,
+            )
+        )
+        logger.debug("[SystemManager] 注册音量获取工具成功")
 
     def _register_app_launcher_tool(
         self, add_tool, PropertyList, Property, PropertyType
@@ -251,17 +248,18 @@ class SystemToolsManager:
         """
         获取管理器状态.
         """
+        available_tools = [
+            "set_volume",
+            "get_volume",
+            "launch_application",
+            "scan_installed_applications",
+            "kill_application",
+            "list_running_applications",
+        ]
         return {
             "initialized": self._initialized,
-            "tools_count": 6,  # 当前注册的工具数量
-            "available_tools": [
-                "get_device_status",
-                "set_volume",
-                "launch_application",
-                "scan_installed_applications",
-                "kill_application",
-                "list_running_applications",
-            ],
+            "tools_count": len(available_tools),
+            "available_tools": available_tools,
         }
 
 

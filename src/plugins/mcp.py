@@ -2,10 +2,14 @@ from typing import Any, Optional
 
 from src.mcp.mcp_server import McpServer
 from src.plugins.base import Plugin
+from src.utils.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class McpPlugin(Plugin):
     name = "mcp"
+    priority = 20  # 工具注册，需要较早初始化
 
     def __init__(self) -> None:
         super().__init__()
@@ -29,17 +33,6 @@ class McpPlugin(Plugin):
             self._server.set_send_callback(_send)
             # 注册通用工具（包含 calendar 工具）。提醒服务的运行改由 CalendarPlugin 管理
             self._server.add_common_tools()
-            # 若音乐播放器存在，将其app引用指向当前应用（example模式下用于UI更新）
-            try:
-                from src.mcp.tools.music import get_music_player_instance
-
-                player = get_music_player_instance()
-                try:
-                    player.app = self.app
-                except Exception:
-                    pass
-            except Exception:
-                pass
         except Exception:
             pass
 
@@ -47,14 +40,14 @@ class McpPlugin(Plugin):
         if not isinstance(message, dict):
             return
         try:
-            if message.get("type") != "mcp":
-                return
-            payload = message.get("payload")
-            if not payload:
-                return
-            if self._server is None:
-                self._server = McpServer.get_instance()
-            await self._server.parse_message(payload)
+            # 处理 MCP 消息
+            if message.get("type") == "mcp":
+                payload = message.get("payload")
+                if not payload:
+                    return
+                if self._server is None:
+                    self._server = McpServer.get_instance()
+                await self._server.parse_message(payload)
         except Exception:
             pass
 
