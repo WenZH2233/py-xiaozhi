@@ -31,6 +31,10 @@ def parse_args():
         action="store_true",
         help="跳过激活流程，直接启动应用（仅用于调试）",
     )
+    parser.add_argument(
+        "--test",
+        help="运行硬件测试模式 (mic: 麦克风测试, speaker: 扬声器测试)",
+    )
     return parser.parse_args()
 
 
@@ -84,6 +88,12 @@ if __name__ == "__main__":
     try:
         args = parse_args()
         setup_logging()
+
+        if args.test:
+            from src.tests.hardware_test import run_test
+
+            asyncio.run(run_test(args.test))
+            sys.exit(0)
 
         # 检测Wayland环境并设置Qt平台插件配置
         import os

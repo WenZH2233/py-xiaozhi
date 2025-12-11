@@ -2,7 +2,10 @@ import asyncio
 import os
 from typing import Any
 
+import numpy as np
+
 from src.audio_codecs.audio_codec import AudioCodec
+from src.constants.constants import AudioConfig
 from src.plugins.base import Plugin
 from src.utils.logging_config import get_logger
 
@@ -47,7 +50,7 @@ class AudioPlugin(Plugin):
     async def on_device_state_changed(self, state):
         """设备状态变化时清空音频队列.
 
-        特别处理：进入 LISTENING 状态时，等待音频硬件输出完全停止， 避免 TTS 尾音被麦克风捕获导致误触发。
+        特别处理：进入 LISTENING 状态时，播放提示音，并等待音频硬件输出完全停止， 避免 TTS 尾音被麦克风捕获导致误触发。
         """
         if not self.codec:
             return
@@ -59,11 +62,43 @@ class AudioPlugin(Plugin):
             # 设置静默期标志，阻止麦克风音频发送
             self._in_silence_period = True
             try:
-                # 等待硬件 DAC 输出完成（50-100ms）+ 声波传播（20ms）+ 安全余量
-                await asyncio.sleep(0.2)
+                # 播放提示音
+                await self._play_listening_tone()
+                
+                # 等待提示音播放完成 + 硬件 DAC 输出完成（50-100ms）+ 声波传播（20ms）+ 安全余量
+                # 提示音约 150ms，这里等待 300ms 比较稳妥
+                await asyncio.sleep(0.3)
             finally:
                 # 清空和等待完成后，解除静默期
                 self._in_silence_period = False
+
+    async def _play_listening_tone(self):
+        """播放提示音"""
+        try:
+            # 生成简单的正弦波提示音
+            # 注意：这里使用 AudioConfig.OUTPUT_SAMPLE_RATE，确保与输出流采样率一致
+            # 但 AudioConfig.OUTPUT_SAMPLE_RATE 是动态的，可能与实际设备采样率不同
+            # 最好使用 self.codec.device_output_sample_rate 如果可用
+            sample_rate = self.codec.device_output_sample_rate or AudioConfig.OUTPUT_SAMPLE_RATE
+            
+            duration = 0.15  # 150ms
+            frequency = 880  # A5
+            
+            t = np.linspace(0, duration, int(sample_rate * duration), False)
+            tone = np.sin(2 * np.pi * frequency * t) * 0.1  # 0.1 音量
+            
+            # 淡入淡出避免爆音
+            fade_len = int(sample_rate * 0.01) # 10ms
+            if fade_len > 0:
+                tone[:fade_len] *= np.linspace(0, 1, fade_len)
+                tone[-fade_len:] *= np.linspace(1, 0, fade_len)
+            
+            pcm_data = (tone * 32767).astype(np.int16)
+            
+            # 写入播放队列
+            await self.codec.write_pcm_direct(pcm_data)
+        except Exception as e:
+            logger.warning(f"播放提示音失败: {e}")
 
     async def on_incoming_json(self, message: Any) -> None:
         """处理 TTS 事件，控制音乐播放.

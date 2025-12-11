@@ -224,6 +224,14 @@ def select_audio_device(
             if any(h in name_low for h in hints):
                 cands.append(i)
         if cands:
+            # 优先选择 hw: 开头的设备，因为它们是直接硬件访问，通常更稳定
+            hw_cands = [i for i in cands if "hw:" in str(devices[i].get("name", "")).casefold()]
+            if hw_cands:
+                hw_cands.sort()
+                info = pack(hw_cands[0])
+                if info:
+                    return info
+            
             cands.sort()  # 稳定：索引小优先
             info = pack(cands[0])
             if info:

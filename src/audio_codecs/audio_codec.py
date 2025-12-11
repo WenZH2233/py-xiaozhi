@@ -79,9 +79,9 @@ class AudioCodec:
         self.input_resampler = None
         self.output_resampler = None
 
-        # 重采样缓冲区
-        self._resample_input_buffer = deque()
-        self._resample_output_buffer = deque()
+        # 重采样缓冲区 (使用 bytearray 提高性能)
+        self._resample_input_buffer = bytearray()
+        self._resample_output_buffer = bytearray()
 
         # 转换标记
         self._need_input_downmix = False
@@ -121,6 +121,15 @@ class AudioCodec:
         try:
             # 加载或初始化设备配置
             await self._load_device_config()
+
+            # 尝试配置混音器（针对 OrangePi/ES8388）
+            try:
+                from src.utils.mixer_utils import configure_audio_mixer, get_es8388_card_num
+                card_num = get_es8388_card_num()
+                configure_audio_mixer(card_num)
+                logger.info(f"已配置 ES8388 混音器设置 (Card {card_num})")
+            except Exception as e:
+                logger.warning(f"配置混音器失败 (非关键错误): {e}")
 
             # 创建Opus编解码器
             await self._create_opus_codecs()
@@ -168,14 +177,26 @@ class AudioCodec:
         # 从配置加载
         self.mic_device_id = input_device_id
         self.speaker_device_id = output_device_id
-        self.device_input_sample_rate = audio_config.get(
-            "input_sample_rate", AudioConfig.INPUT_SAMPLE_RATE
+        self.device_input_sample_rate = (
+            audio_config.get("input_sample_rate") or AudioConfig.INPUT_SAMPLE_RATE
         )
-        self.device_output_sample_rate = audio_config.get(
-            "output_sample_rate", AudioConfig.OUTPUT_SAMPLE_RATE
+        self.device_output_sample_rate = (
+            audio_config.get("output_sample_rate") or AudioConfig.OUTPUT_SAMPLE_RATE
         )
-        self.input_channels = audio_config.get("input_channels", 1)
-        self.output_channels = audio_config.get("output_channels", 1)
+        self.input_channels = audio_config.get("input_channels") or 1
+        self.output_channels = audio_config.get("output_channels") or 1
+
+        # 强制限制声道数，避免配置错误导致无法打开流
+        # 注意：对于某些虚拟设备（如 default/sysdefault），报告的声道数可能非常大（如128）
+        # 但实际上它们可能只支持立体声。这里我们保守地限制为2声道。
+        # 如果设备确实需要更多声道，可以通过配置文件强制指定。
+        if self.input_channels > 2:
+             logger.warning(f"检测到输入设备报告 {self.input_channels} 声道，强制限制为 2 声道以避免兼容性问题")
+             self.input_channels = 2
+        
+        if self.output_channels > 2:
+             logger.warning(f"检测到输出设备报告 {self.output_channels} 声道，强制限制为 2 声道以避免兼容性问题")
+             self.output_channels = 2
 
         # 计算设备帧大小
         self._device_input_frame_size = int(
@@ -205,8 +226,20 @@ class AudioCodec:
         raw_input_channels = in_info["channels"]
         raw_output_channels = out_info["channels"]
 
-        self.input_channels = min(raw_input_channels, AudioConfig.MAX_INPUT_CHANNELS)
-        self.output_channels = min(raw_output_channels, AudioConfig.MAX_OUTPUT_CHANNELS)
+        # 强制限制声道数，避免配置错误导致无法打开流
+        # 注意：对于某些虚拟设备（如 default/sysdefault），报告的声道数可能非常大（如128）
+        # 但实际上它们可能只支持立体声。这里我们保守地限制为2声道。
+        if raw_input_channels > 2:
+             logger.warning(f"检测到输入设备报告 {raw_input_channels} 声道，强制限制为 2 声道以避免兼容性问题")
+             self.input_channels = 2
+        else:
+             self.input_channels = raw_input_channels
+
+        if raw_output_channels > 2:
+             logger.warning(f"检测到输出设备报告 {raw_output_channels} 声道，强制限制为 2 声道以避免兼容性问题")
+             self.output_channels = 2
+        else:
+             self.output_channels = raw_output_channels
 
         # 记录设备信息
         self.mic_device_id = in_info["index"]
@@ -330,10 +363,11 @@ class AudioCodec:
                 samplerate=self.device_input_sample_rate,  # 设备原生采样率
                 channels=self.input_channels,  # 设备原生声道数
                 dtype=np.float32,
-                blocksize=self._device_input_frame_size,  # 设备原生帧大小
+                # blocksize=self._device_input_frame_size,  # 设备原生帧大小
+                blocksize=0, # 让后端决定最佳块大小，避免缓冲区问题
                 callback=self._input_callback,
                 finished_callback=self._input_finished_callback,
-                latency="low",
+                # latency="low", # 移除低延迟设置，避免在某些硬件上导致缓冲区欠载/溢出
             )
 
             # 输出流：使用设备原生采样率和声道数
@@ -364,86 +398,129 @@ class AudioCodec:
         """
         输入回调：设备原生格式 → 服务端协议格式 转换流程：多声道/高采样率 → 下混+重采样 → 16kHz单声道 → Opus编码.
         """
-        if status and "overflow" not in str(status).lower():
+        if status:
             logger.warning(f"输入流状态: {status}")
 
         if self._is_closing:
             return
 
         try:
+            # 调试日志：检查输入数据
+            max_val = np.max(np.abs(indata))
+            # logger.info(f"Input callback: frames={frames}, max_val={max_val:.4f}")
+            if max_val > 0:
+                 # 简单的限流日志，避免刷屏，但这里为了调试先全部打印
+                 # logger.debug(f"输入回调: frames={frames}, shape={indata.shape}, max={max_val:.4f}")
+                 pass
+            else:
+                 logger.warning(f"输入数据全为静音! frames={frames}")
+
+            # 确保 indata 是 float32
+            if indata.dtype != np.float32:
+                indata = indata.astype(np.float32)
+
             # 步骤1: 声道下混（立体声/多声道 → 单声道）
             if self._need_input_downmix:
                 # indata shape: (frames, channels)
-                audio_data = downmix_to_mono(indata, keepdims=False)
+                # 某些设备（如ES8388）可能在通道1有数据，通道2是静音，或者反过来
+                # 直接平均可能会导致音量减半或引入噪音
+                # 这里尝试只取第一个通道，通常是左声道
+                # audio_data_mono = downmix_to_mono(indata, keepdims=False)
+                # audio_data_mono = indata[:, 0]
+                # 尝试取第二个通道
+                audio_data_mono = indata[:, 1]
             else:
-                audio_data = indata.flatten()  # 已经是单声道
+                audio_data_mono = indata.flatten()  # 已经是单声道
+
+            # 准备待处理的帧列表
+            frames_to_process = []
 
             # 步骤2: 采样率转换（设备采样率 → 16kHz）
             if self.input_resampler is not None:
-                audio_data = self._process_input_resampling(audio_data)
-                if audio_data is None:  # 数据不足，等待下一帧
-                    return
+                frames_to_process = self._process_input_resampling(audio_data_mono)
+            else:
+                # 无需重采样，直接检查帧大小
+                if len(audio_data_mono) == AudioConfig.INPUT_FRAME_SIZE:
+                    frames_to_process.append(audio_data_mono)
+                elif len(audio_data_mono) > AudioConfig.INPUT_FRAME_SIZE:
+                    # 如果数据过长，截断（虽然理论上不应该发生）
+                    frames_to_process.append(audio_data_mono[:AudioConfig.INPUT_FRAME_SIZE])
+                # 如果数据不足，丢弃（或等待下一帧，但这里简化处理）
 
-            # 步骤3: 验证帧大小
-            if len(audio_data) != AudioConfig.INPUT_FRAME_SIZE:
-                return
+            for audio_data in frames_to_process:
+                # 步骤3: 验证帧大小 (双重保险)
+                if len(audio_data) != AudioConfig.INPUT_FRAME_SIZE:
+                    continue
 
-            # 步骤4: 转换为 int16 供 Opus 编码和 AEC 处理
-            audio_data_int16 = (audio_data * 32768.0).astype(np.int16)
+                # 步骤4: 转换为 int16 供 Opus 编码和 AEC 处理
+                audio_data_int16 = (audio_data * 32768.0).astype(np.int16)
+                
+                # 调试日志：检查转换后的数据
+                # if np.max(np.abs(audio_data_int16)) == 0:
+                #     logger.warning("转换后数据全为静音")
 
-            # 步骤5: AEC处理（如果启用）
-            if self._aec_enabled and self.audio_processor._is_macos:
-                try:
-                    audio_data_int16 = self.audio_processor.process_audio(audio_data_int16)
-                except Exception as e:
-                    logger.warning(f"AEC处理失败，使用原始音频: {e}")
+                # 步骤5: AEC处理（如果启用）
+                if self._aec_enabled and self.audio_processor._is_macos:
+                    try:
+                        audio_data_int16 = self.audio_processor.process_audio(audio_data_int16)
+                    except Exception as e:
+                        logger.warning(f"AEC处理失败，使用原始音频: {e}")
 
-            # 步骤6: Opus编码并实时发送
-            if self._encoded_callback:
-                try:
-                    pcm_data = audio_data_int16.tobytes()
-                    encoded_data = self.opus_encoder.encode(
-                        pcm_data, AudioConfig.INPUT_FRAME_SIZE
-                    )
-                    if encoded_data:
-                        self._encoded_callback(encoded_data)
-                except Exception as e:
-                    logger.warning(f"实时录音编码失败: {e}")
+                # 步骤6: Opus编码并实时发送
+                if self._encoded_callback:
+                    try:
+                        pcm_data = audio_data_int16.tobytes()
+                        encoded_data = self.opus_encoder.encode(
+                            pcm_data, AudioConfig.INPUT_FRAME_SIZE
+                        )
+                        if encoded_data:
+                            self._encoded_callback(encoded_data)
+                    except Exception as e:
+                        logger.warning(f"实时录音编码失败: {e}")
 
-            # 步骤7: 通知音频监听器（解耦唤醒词检测）
-            for listener in self._audio_listeners:
-                try:
-                    listener.on_audio_data(audio_data_int16.copy())
-                except Exception as e:
-                    logger.warning(f"音频监听器处理失败: {e}")
+                # 步骤7: 通知音频监听器（解耦唤醒词检测）
+                for listener in self._audio_listeners:
+                    try:
+                        listener.on_audio_data(audio_data_int16.copy())
+                    except Exception as e:
+                        logger.warning(f"音频监听器处理失败: {e}")
 
         except Exception as e:
             logger.error(f"输入回调错误: {e}")
 
-    def _process_input_resampling(self, audio_data):
+    def _process_input_resampling(self, audio_data) -> List[np.ndarray]:
         """
-        输入重采样处理：设备采样率 → 16kHz 使用缓冲区累积数据，凑够一帧再返回.
+        输入重采样处理：设备采样率 → 16kHz 使用缓冲区累积数据，返回所有完整的帧.
         """
+        frames = []
         try:
+            # 确保输入数据是 float32
+            if audio_data.dtype != np.float32:
+                audio_data = audio_data.astype(np.float32)
+
             resampled_data = self.input_resampler.resample_chunk(audio_data, last=False)
             if len(resampled_data) > 0:
-                self._resample_input_buffer.extend(resampled_data)
+                # 转换为 bytes 并追加到 bytearray 缓冲区
+                self._resample_input_buffer.extend(resampled_data.tobytes())
 
-            # 累积到目标帧大小
-            expected_frame_size = AudioConfig.INPUT_FRAME_SIZE
-            if len(self._resample_input_buffer) < expected_frame_size:
-                return None
+            # 计算每帧的字节数 (float32 = 4 bytes)
+            expected_frame_bytes = AudioConfig.INPUT_FRAME_SIZE * 4
+            
+            while len(self._resample_input_buffer) >= expected_frame_bytes:
+                # 切片获取一帧数据
+                frame_bytes = self._resample_input_buffer[:expected_frame_bytes]
+                # 从缓冲区移除已处理的数据 (C 语言层面的内存移动，比 Python 循环快得多)
+                del self._resample_input_buffer[:expected_frame_bytes]
+                
+                # 转换回 numpy 数组
+                frame_data = np.frombuffer(frame_bytes, dtype=np.float32)
+                frames.append(frame_data)
 
-            # 取出一帧
-            frame_data = []
-            for _ in range(expected_frame_size):
-                frame_data.append(self._resample_input_buffer.popleft())
-
-            return np.array(frame_data, dtype=np.float32)
+            return frames
 
         except Exception as e:
             logger.error(f"输入重采样失败: {e}")
-            return None
+            return []
 
     def _output_callback(self, outdata, frames, time_info, status):
         """
@@ -528,16 +605,17 @@ class AudioCodec:
                         audio_data_float, last=False
                     )
                     if len(resampled_data) > 0:
-                        self._resample_output_buffer.extend(resampled_data)
+                        self._resample_output_buffer.extend(resampled_data.tobytes())
                 except asyncio.QueueEmpty:
                     break
 
-            # 取出所需帧数的单声道数据
-            if len(self._resample_output_buffer) >= frames:
-                frame_data = []
-                for _ in range(frames):
-                    frame_data.append(self._resample_output_buffer.popleft())
-                mono_data = np.array(frame_data, dtype=np.float32)
+            # 取出所需帧数的单声道数据 (float32 = 4 bytes)
+            required_bytes = frames * 4
+            if len(self._resample_output_buffer) >= required_bytes:
+                chunk_bytes = self._resample_output_buffer[:required_bytes]
+                del self._resample_output_buffer[:required_bytes]
+                
+                mono_data = np.frombuffer(chunk_bytes, dtype=np.float32)
 
                 # 声道处理
                 if self._need_output_upmix:
@@ -767,13 +845,15 @@ class AudioCodec:
             except asyncio.QueueEmpty:
                 break
 
-        # 清空重采样缓冲区
+        # 清空重采样缓冲区 (bytearray, len返回字节数，需除以4转换为样本数，再估算为帧数)
+        # 这里简单处理，直接统计字节数，日志里说明即可
         if self._resample_input_buffer:
-            cleared_count += len(self._resample_input_buffer)
+            cleared_count += len(self._resample_input_buffer) // (AudioConfig.INPUT_FRAME_SIZE * 4)
             self._resample_input_buffer.clear()
 
         if self._resample_output_buffer:
-            cleared_count += len(self._resample_output_buffer)
+            # 输出帧大小可能变化，这里粗略估算
+            cleared_count += len(self._resample_output_buffer) // (AudioConfig.OUTPUT_FRAME_SIZE * 4)
             self._resample_output_buffer.clear()
 
         if cleared_count > 0:
