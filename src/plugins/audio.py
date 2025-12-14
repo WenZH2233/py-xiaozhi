@@ -66,8 +66,8 @@ class AudioPlugin(Plugin):
                 await self._play_listening_tone()
                 
                 # 等待提示音播放完成 + 硬件 DAC 输出完成（50-100ms）+ 声波传播（20ms）+ 安全余量
-                # 提示音约 150ms，这里等待 300ms 比较稳妥
-                await asyncio.sleep(0.3)
+                # 提示音约 300ms，这里等待 500ms 比较稳妥
+                await asyncio.sleep(0.5)
             finally:
                 # 清空和等待完成后，解除静默期
                 self._in_silence_period = False
@@ -81,11 +81,11 @@ class AudioPlugin(Plugin):
             # 最好使用 self.codec.device_output_sample_rate 如果可用
             sample_rate = self.codec.device_output_sample_rate or AudioConfig.OUTPUT_SAMPLE_RATE
             
-            duration = 0.15  # 150ms
+            duration = 0.3  # 300ms
             frequency = 880  # A5
             
             t = np.linspace(0, duration, int(sample_rate * duration), False)
-            tone = np.sin(2 * np.pi * frequency * t) * 0.1  # 0.1 音量
+            tone = np.sin(2 * np.pi * frequency * t) * 0.7  # 0.1 音量
             
             # 淡入淡出避免爆音
             fade_len = int(sample_rate * 0.01) # 10ms
@@ -119,7 +119,7 @@ class AudioPlugin(Plugin):
                 elif state == "stop":
                     # TTS 结束：恢复音乐播放
                     await self._resume_music_after_tts()
-                    await self.codec.clear_audio_queue()
+                    # await self.codec.clear_audio_queue() # 不要在这里清空队列，否则会截断尾音
         except Exception as e:
             logger.error(f"处理 TTS 事件失败: {e}", exc_info=True)
 
