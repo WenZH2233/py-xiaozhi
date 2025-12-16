@@ -62,6 +62,22 @@ class AudioCodec:
         """
         # 获取配置管理器
         self.config = ConfigManager.get_instance()
+        
+        # 麦克风增益
+        try:
+            self.mic_gain = float(self.config.get_config("AUDIO_PROCESSING.MIC_GAIN", 1.0))
+            if self.mic_gain != 1.0:
+                logger.info(f"麦克风增益已启用: {self.mic_gain}x")
+        except Exception:
+            self.mic_gain = 1.0
+
+        # 输出增益
+        try:
+            self.output_gain = float(self.config.get_config("AUDIO_PROCESSING.OUTPUT_GAIN", 1.0))
+            if self.output_gain != 1.0:
+                logger.info(f"输出增益已启用: {self.output_gain}x")
+        except Exception:
+            self.output_gain = 1.0
 
         # Opus编解码器
         self.opus_encoder = None
@@ -419,6 +435,10 @@ class AudioCodec:
             if indata.dtype != np.float32:
                 indata = indata.astype(np.float32)
 
+            # 应用麦克风增益
+            if self.mic_gain != 1.0:
+                indata = indata * self.mic_gain
+
             # 步骤1: 声道下混（立体声/多声道 → 单声道）
             if self._need_input_downmix:
                 # indata shape: (frames, channels)
@@ -568,6 +588,10 @@ class AudioCodec:
             # 转换为 float32 用于播放
             mono_samples_float = mono_samples.astype(np.float32) / 32768.0
 
+            # 应用输出增益
+            if self.output_gain != 1.0:
+                mono_samples_float = mono_samples_float * self.output_gain
+
             # 声道处理
             if self._need_output_upmix:
                 # 单声道 → 多声道（复制到所有声道）
@@ -600,6 +624,11 @@ class AudioCodec:
                     audio_data = self._output_buffer.get_nowait()
                     # 转换 int16 → float32
                     audio_data_float = audio_data.astype(np.float32) / 32768.0
+
+                    # 应用输出增益
+                    if self.output_gain != 1.0:
+                        audio_data_float = audio_data_float * self.output_gain
+
                     # 24kHz单声道 → 设备采样率单声道重采样
                     resampled_data = self.output_resampler.resample_chunk(
                         audio_data_float, last=False

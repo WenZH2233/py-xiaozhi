@@ -65,6 +65,10 @@ class ConfigManager:
             "FILTER_LENGTH_RATIO": 0.4,
             "ENABLE_PREPROCESS": True,
         },
+        "AUDIO_PROCESSING": {
+            "MIC_GAIN": 1.0,
+            "OUTPUT_GAIN": 1.0,
+        },
         "AUDIO_DEVICES": {
             "input_device_id": None,
             "input_device_name": None,

@@ -14,6 +14,10 @@ def configure_audio_mixer(card_num=3):
         f"tinymix -D {card_num} 31 1",  # Left PGA Mux -> Line 2L
         f"tinymix -D {card_num} 32 1",  # Right PGA Mux -> Line 2R
         f"tinymix -D {card_num} 33 1",  # Differential Mux -> Line 2
+        # Playback settings
+        f"tinymix -D {card_num} 20 192", # PCM Volume -> Max
+        f"tinymix -D {card_num} 23 33",  # Output 1 Playback Volume -> Max
+        f"tinymix -D {card_num} 24 33",  # Output 2 Playback Volume -> Max
     ]
 
     print(f"正在配置声卡 {card_num} 的混音器设置...")
