@@ -326,6 +326,9 @@ class SystemInitializer:
         # 需要激活界面，根据模式创建
         if mode == "gui":
             return await self._run_gui_activation()
+        elif mode == "service":
+            logger.error("设备未激活，服务模式无法进行激活流程。请先使用 GUI 或 CLI 模式激活设备。")
+            return {"is_activated": False, "error": "Device not activated"}
         else:
             return await self._run_cli_activation()
 

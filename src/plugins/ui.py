@@ -47,6 +47,11 @@ class UIPlugin(Plugin):
 
             self._is_gui = True
             return GuiDisplay()
+        elif self.mode == "service":
+            from src.display.service_display import ServiceDisplay
+
+            self._is_gui = False
+            return ServiceDisplay()
         else:
             from src.display.cli_display import CliDisplay
 
@@ -70,6 +75,9 @@ class UIPlugin(Plugin):
         """
         设置 display 回调.
         """
+        if self.mode == "service":
+            return
+
         if self._is_gui:
             # GUI 需要调度到异步任务
             callbacks = {

@@ -297,6 +297,19 @@ class Application:
         try:
             msg_type = json_data.get("type") if isinstance(json_data, dict) else None
             logger.info(f"收到JSON消息: type={msg_type}")
+            
+            # 记录文本内容 (STT/TTS/LLM)
+            if msg_type in ("stt", "tts", "llm"):
+                text = json_data.get("text")
+                if text:
+                    logger.info(f"[{msg_type.upper()}] {text}")
+                else:
+                    # 如果没有文本字段，打印完整消息以便调试
+                    logger.info(f"[{msg_type.upper()}] Payload: {json_data}")
+
+                if emotion := json_data.get("emotion"):
+                    logger.info(f"[{msg_type.upper()}] Emotion: {emotion}")
+
             # 将 TTS start/stop 映射为设备状态（支持自动/实时，且不污染手动模式）
             if msg_type == "tts":
                 state = json_data.get("state")
